@@ -2,50 +2,61 @@ import subprocess
 import json
 import hashlib
 import requests
-from typing import Dict, Any
 import sys
 
+# ANSI color codes for terminal output
+RED = "\033[91m"
+GREEN = "\033[92m"
+RESET = "\033[0m"
 
-def get_hash(password: str) -> str:
+def get_hash(password: bytes) -> str:
     m = hashlib.sha1()
     m.update(password)
-    password_hash = m.hexdigest().upper()
-    return password_hash
+    return m.hexdigest().upper()
 
-
-def get_pwned(password_hash: str) -> Dict[str, int]:
-    key = password_hash[0:5]
+def get_pwned(password_hash: str) -> dict:
+    key = password_hash[:5]
     res = requests.get(f"https://api.pwnedpasswords.com/range/{key}")
-    assert res.status_code == 200
+    res.raise_for_status()
     lines = res.text.splitlines()
-    pairs = [line.split(":") for line in lines]
-    results = {f"{key}{ending}": int(count) for ending, count in pairs}
-    return results
+    # Map full hash to count
+    return {f"{key}{suffix}": int(count) for suffix, count in (line.split(":") for line in lines)}
 
-
-def get_credentials() -> Dict[str, Any]:
-    result = subprocess.run(["bw", "list", "items"], capture_output=True)
+def get_credentials() -> list:
+    result = subprocess.run(["bw", "list", "items"], capture_output=True, text=True)
     items = json.loads(result.stdout)
-    return [item for item in items if "login" in item]
-
+    return [item for item in items if item.get("login", {}).get("password")]
 
 def main():
-    count_pwned = 0
     credentials = get_credentials()
-    for item in credentials:
-        if not item["login"]["password"]:
-            continue
-        password = item["login"]["password"].encode("utf-8")
-        password_hash = get_hash(password)
-        results = get_pwned(password_hash)
-        pwned = password_hash in results
-        if not pwned:
-            continue
-        count_pwned += 1
-        print(f"{item['name']}:{item['login']['username']} has been pwned!")
+    total = len(credentials)
+    count_pwned = 0
 
-    print(f"{count_pwned} of {len(credentials)} logins have been pwned.")
+    for idx, item in enumerate(credentials, start=1):
+        # Show live progress
+        pct = idx / total * 100
+        progress = f"Scanning {idx}/{total} ({pct:5.1f}%)"
+        print(progress, end="\r", flush=True)
 
+        pwd = item["login"]["password"].encode("utf-8")
+        h = get_hash(pwd)
+        results = get_pwned(h)
+
+        if h in results:
+            count_pwned += 1
+            # Move to new line before printing pwned alert
+            print(" " * len(progress), end="\r")  # clear the progress line
+            print(
+                f"{RED}[PWNED]{RESET} "
+                f"{item['name']} ({item['login']['username']}) "
+                f"— seen {results[h]:,} times"
+            )
+            print(item["login"]["password"])
+
+    # Ensure the progress line doesn't overwrite the summary
+    print()
+    safe = total - count_pwned
+    print(f"{GREEN}{safe}{RESET} safe, {RED}{count_pwned}{RESET} pwned out of {total} checked.")
 
 if __name__ == "__main__":
     sys.exit(main())
